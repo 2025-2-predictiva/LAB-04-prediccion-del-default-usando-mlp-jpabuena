@@ -96,3 +96,151 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
+from sklearn.model_selection import GridSearchCV
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns="ID")
+    df = df.dropna()
+    df = df[
+        (df["SEX"] != 0) &
+        (df["EDUCATION"] != 0) &
+        (df["MARRIAGE"] != 0)
+    ]
+    df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
+
+    return df
+
+def create_pipeline():
+    categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+    numerical_features = ["LIMIT_BAL", "AGE",
+                          "PAY_0", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6",
+                          "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4",
+                          "BILL_AMT5", "BILL_AMT6",
+                          "PAY_AMT1", "PAY_AMT2", "PAY_AMT3",
+                          "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"]
+
+
+    transformer = ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(dtype='int', handle_unknown='ignore'),
+             categorical_features),
+            ('num', StandardScaler(), numerical_features)
+        ],
+        remainder="passthrough"
+    )
+
+
+    pipeline = Pipeline([
+        ('transformer', transformer),
+        ('feature_selection', SelectKBest(score_func=f_classif)),
+        ('pca', PCA()),
+        ('classifier', MLPClassifier(max_iter=15000, random_state=42))
+    ])
+
+    return pipeline
+
+
+def make_grid_search(pipeline, cv=10):
+    param_grid = {
+        'pca__n_components': [None],
+        'feature_selection__k': [20],
+        'classifier__hidden_layer_sizes': [(50,30,40,60)],
+        'classifier__alpha': [0.28],
+        'classifier__learning_rate_init': [0.001]
+    }
+
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        scoring='balanced_accuracy',
+        cv=cv,
+        refit='true'
+    )
+
+    return grid_search
+
+def save_model(estimator):
+    if not os.path.exists("../files/models"):
+        os.makedirs("../files/models")
+    with gzip.open("../files/models/model.pkl.gz", "wb") as f:
+        pickle.dump(estimator, f)
+
+def calc_metrics_precision(y_true, y_pred, dataset_type):
+    return {
+        "type": "metrics",
+        "dataset": dataset_type,
+        "precision": precision_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred),
+        "f1_score": f1_score(y_true, y_pred)
+    }
+
+def calc_conf_matrix(y_true, y_pred, dataset_type):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_type,
+        "true_0": {"predicted_0": int(tn), "predicted_1": int(fp)},
+        "true_1": {"predicted_0": int(fn), "predicted_1": int(tp)}
+    }
+
+def save_metrics(metrics):
+    if not os.path.exists("../files/output"):
+        os.makedirs("../files/output")
+
+    with open("../files/output/metrics.json", "w") as f:
+        for m in metrics:
+            f.write(json.dumps(m) + "\n")
+
+# load the data
+train_data = pd.read_csv("../files/input/train_data.csv.zip", compression="zip")
+test_data = pd.read_csv("../files/input/test_data.csv.zip", compression="zip")
+
+# clean the data
+train_data = clean_data(train_data)
+test_data = clean_data(test_data)
+
+# separate the data
+(x_train, y_train) = train_data.drop(columns="default"), train_data["default"]
+(x_test, y_test) = test_data.drop(columns="default"), test_data["default"]
+
+# create the pipeline
+pipeline = create_pipeline()
+pipeline.fit(x_train, y_train)
+
+# hyperparameter
+estimator = make_grid_search(pipeline)
+estimator.fit(x_train, y_train)
+
+# save model
+save_model(estimator)
+
+# calculate metrics
+y_train_pred = estimator.predict(x_train)
+y_test_pred = estimator.predict(x_test)
+
+train_metrics = calc_metrics_precision(y_train, y_train_pred, "train")
+test_metrics = calc_metrics_precision(y_test, y_test_pred, "test")
+
+train_cm = calc_conf_matrix(y_train, y_train_pred, "train")
+test_cm = calc_conf_matrix(y_test, y_test_pred, "test")
+
+metrics = [train_metrics, test_metrics, train_cm, test_cm]
+save_metrics(metrics)
